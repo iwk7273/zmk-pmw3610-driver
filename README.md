@@ -4,8 +4,8 @@ This work is based on [ufan's zmk pixart sensor drivers](https://github.com/ufan
 
 #### What is different to [inorichi's driver](https://github.com/inorichi/zmk-pmw3610-driver)
 - Compatible to be used on split peripheral shield.
-- Replaced `CONFIG_PMW3610_ORIENTATION_*` with `CONFIG_PMW3610_SWAP_XY` and `PMW3610_INVERT_*`. Then now, it can use for building conventional palm-gripping mouse.
-- Moved `CONFIG_PMW3610_CPI` to device tree node `.dts/.overlay`. It is now allowed to setup diffeent config for multi-sensor on single shield. In case of building typical mouse shield, we use one movment sensor on bottom, and another sensor for scrolling on top. Those settings could be distinguishable.
+- Replaced `CONFIG_PMW3610_CUSTOM_ORIENTATION_*` with `CONFIG_PMW3610_CUSTOM_SWAP_XY` and `CONFIG_PMW3610_CUSTOM_INVERT_*`. Then now, it can use for building conventional palm-gripping mouse.
+- Moved `CONFIG_PMW3610_CUSTOM_CPI` to device tree node `.dts/.overlay`. It is now allowed to setup diffeent config for multi-sensor on single shield. In case of building typical mouse shield, we use one movment sensor on bottom, and another sensor for scrolling on top. Those settings could be distinguishable.
 - Features for scroll-mode, snipe-mode, and auto-layer are no longer needed to be provided from sensor driver. Those settings is now configurable in keymap with layer-based `zmk,input-listener`, instead of setup static value in shield config files.
 - Seperating sampling rate and reporting rate. It reports accumulated XY axes displacement between data ready interrupts. You will still feeling lag and jumpy in noisy radio hell, but the cursor traction should being lossless, and predicable in exact terms.
 - Default to use power saving config. Applying shorter-than-default downshift time to PMW3610.
@@ -62,9 +62,10 @@ Update `board.overlay` adding the necessary bits (update the pins for your board
 
 > **Note:** Zephyr 4.1 introduced its own `pixart,pmw3610` binding. To avoid the
 > duplicate-compatible error during `west build`, this module now exposes the
-> unique `zmk,pixart-pmw3610` compatible. Update your overlays accordingly (you
-> can still list `"pixart,pmw3610"` as an additional, more generic compatible if
-> desired, but make sure `zmk,pixart-pmw3610` is present so this driver binds).
+> unique `pixart,pmw3610-custom` compatible. Update your overlays accordingly
+> (you can still list `"pixart,pmw3610"` as an additional, more generic
+> compatible if desired, but make sure `pixart,pmw3610-custom` is present so
+> this driver binds).
 
 &spi0 {
     status = "okay";
@@ -76,7 +77,7 @@ Update `board.overlay` adding the necessary bits (update the pins for your board
 
     trackball: trackball@0 {
         status = "okay";
-        compatible = "zmk,pixart-pmw3610";
+        compatible = "pixart,pmw3610-custom";
         reg = <0>;
         spi-max-frequency = <2000000>;
         irq-gpios = <&gpio0 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
@@ -111,15 +112,15 @@ Enable the driver config in `<shield>.config` file (read the Kconfig file to fin
 CONFIG_SPI=y
 CONFIG_INPUT=y
 CONFIG_ZMK_POINTING=y
-CONFIG_PMW3610=y
-# CONFIG_PMW3610_SWAP_XY=y
-# CONFIG_PMW3610_INVERT_X=y
-# CONFIG_PMW3610_INVERT_Y=y
-# CONFIG_PMW3610_REPORT_INTERVAL_MIN=12
-# CONFIG_PMW3610_LOG_LEVEL_DBG=y
-# CONFIG_PMW3610_INIT_POWER_UP_EXTRA_DELAY_MS=300 // <--see Troubleshooting
+CONFIG_PMW3610_CUSTOM=y
+# CONFIG_PMW3610_CUSTOM_SWAP_XY=y
+# CONFIG_PMW3610_CUSTOM_INVERT_X=y
+# CONFIG_PMW3610_CUSTOM_INVERT_Y=y
+# CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN=12
+# CONFIG_PMW3610_CUSTOM_LOG_LEVEL_DBG=y
+# CONFIG_PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS=300 // <--see Troubleshooting
 ```
 
 ## Troubleshooting
 
-If you are getting `Incorrect product id 0xFF (expecting 0x3E)!` on `nice_nano_v2` board from the log, you'd want to apply `CONFIG_PMW3610_INIT_POWER_UP_EXTRA_DELAY_MS=1000` in your shield .conf/.overlay file. Due to this driver doesn't offer module dependancy setting, that would ensure external power (to enable VCC pin on board) is ready, the `CONFIG_PMW3610_INIT_POWER_UP_EXTRA_DELAY_MS` would use to add extra one second delay of power up.
+If you are getting `Incorrect product id 0xFF (expecting 0x3E)!` on `nice_nano_v2` board from the log, you'd want to apply `CONFIG_PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS=1000` in your shield .conf/.overlay file. Due to this driver doesn't offer module dependancy setting, that would ensure external power (to enable VCC pin on board) is ready, the `CONFIG_PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS` would use to add extra one second delay of power up.
