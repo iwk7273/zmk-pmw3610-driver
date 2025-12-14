@@ -60,6 +60,12 @@ Update `board.overlay` adding the necessary bits (update the pins for your board
 
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
+> **Note:** Zephyr 4.1 introduced its own `pixart,pmw3610` binding. To avoid the
+> duplicate-compatible error during `west build`, this module now exposes the
+> unique `zmk,pixart-pmw3610` compatible. Update your overlays accordingly (you
+> can still list `"pixart,pmw3610"` as an additional, more generic compatible if
+> desired, but make sure `zmk,pixart-pmw3610` is present so this driver binds).
+
 &spi0 {
     status = "okay";
     compatible = "nordic,nrf-spim";
@@ -70,7 +76,7 @@ Update `board.overlay` adding the necessary bits (update the pins for your board
 
     trackball: trackball@0 {
         status = "okay";
-        compatible = "pixart,pmw3610";
+        compatible = "zmk,pixart-pmw3610";
         reg = <0>;
         spi-max-frequency = <2000000>;
         irq-gpios = <&gpio0 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
