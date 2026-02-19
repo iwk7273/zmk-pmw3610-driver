@@ -124,3 +124,12 @@ CONFIG_PMW3610_CUSTOM=y
 ## Troubleshooting
 
 If you are getting `Incorrect product id 0xFF (expecting 0x3E)!` on `nice_nano_v2` board from the log, you'd want to apply `CONFIG_PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS=1000` in your shield .conf/.overlay file. Due to this driver doesn't offer module dependancy setting, that would ensure external power (to enable VCC pin on board) is ready, the `CONFIG_PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS` would use to add extra one second delay of power up.
+
+If you are getting intermittent initialization failures (e.g. self-test or product id errors), you can enable init retries:
+
+```
+CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT=3
+CONFIG_PMW3610_CUSTOM_INIT_RETRY_DELAY_MS=200
+```
+
+Set `CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT=0` to disable retries.

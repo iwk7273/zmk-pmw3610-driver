@@ -376,15 +376,29 @@ static int pmw3610_async_init_configure(const struct device *dev) {
 
     data->err = async_init_fn[data->async_init_step](dev);
     if (data->err) {
-        LOG_ERR("PMW3610 initialization failed in step %d", data->async_init_step);
+        if (CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT > 0 &&
+            data->init_retry_count < CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT) {
+            data->init_retry_count++;
+            LOG_WRN("PMW3610 init failed in step %d, retry %u/%u", data->async_init_step,
+                    data->init_retry_count, CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT);
+            data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
+            k_work_schedule(&data->init_work,
+                            K_MSEC(async_init_delay[ASYNC_INIT_STEP_POWER_UP] +
+                                   CONFIG_PMW3610_CUSTOM_INIT_RETRY_DELAY_MS));
+        } else {
+            LOG_ERR("PMW3610 initialization failed in step %d", data->async_init_step);
+            LOG_ERR("PMW3610 init failed after %u retries", data->init_retry_count);
+        }
+        return;
     } else {
         data->async_init_step++;
 
-          if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
-              data->ready = true; // sensor is ready to work
-              LOG_INF("PMW3610 initialized");
-              pmw3610_set_interrupt(dev, true);
-              uint32_t pending_cpi = (uint32_t)atomic_get(&data->pending_cpi);
+        if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
+            data->ready = true; // sensor is ready to work
+            data->init_retry_count = 0;
+            LOG_INF("PMW3610 initialized");
+            pmw3610_set_interrupt(dev, true);
+            uint32_t pending_cpi = (uint32_t)atomic_get(&data->pending_cpi);
               if (pending_cpi != 0) {
                   int err = pmw3610_set_cpi(dev, pending_cpi);
                   if (err) {
@@ -555,9 +569,10 @@ static int pmw3610_init_irq(const struct device *dev) {
 		return -ENODEV;
 	}
 
-      // init device pointer
-      data->dev = dev;
-      atomic_set(&data->pending_cpi, 0);
+    // init device pointer
+    data->dev = dev;
+    atomic_set(&data->pending_cpi, 0);
+    data->init_retry_count = 0;
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;

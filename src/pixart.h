@@ -26,6 +26,7 @@ struct pixart_data {
 
     struct k_work_delayable      init_work; // the work structure for delayable init steps
     int                          async_init_step;
+    uint8_t                      init_retry_count;
 
     bool                         ready; // whether init is finished successfully
     int                          err; // error code during async init
