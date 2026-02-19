@@ -10,6 +10,7 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/sys/atomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,7 @@ struct pixart_data {
 
     bool                         ready; // whether init is finished successfully
     int                          err; // error code during async init
+    atomic_t                     pending_cpi; // pending CPI before ready (0 = none)
 };
 
 // device config data structure
