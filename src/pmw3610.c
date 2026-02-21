@@ -367,28 +367,52 @@ static int pmw3610_async_init_configure(const struct device *dev) {
     return 0;
 }
 
-static void pmw3610_async_init(struct k_work *work) {
-    struct k_work_delayable *work2 = (struct k_work_delayable *)work;
-    struct pixart_data *data = CONTAINER_OF(work2, struct pixart_data, init_work);
-    const struct device *dev = data->dev;
+  static void pmw3610_async_init(struct k_work *work) {
+      struct k_work_delayable *work2 = (struct k_work_delayable *)work;
+      struct pixart_data *data = CONTAINER_OF(work2, struct pixart_data, init_work);
+      const struct device *dev = data->dev;
 
     LOG_INF("PMW3610 async init step %d", data->async_init_step);
 
     data->err = async_init_fn[data->async_init_step](dev);
     if (data->err) {
-        LOG_ERR("PMW3610 initialization failed in step %d", data->async_init_step);
+        if (CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT > 0 &&
+            data->init_retry_count < CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT) {
+            data->init_retry_count++;
+            LOG_WRN("PMW3610 init failed in step %d, retry %u/%u", data->async_init_step,
+                    data->init_retry_count, CONFIG_PMW3610_CUSTOM_INIT_RETRY_COUNT);
+            data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
+            k_work_schedule(&data->init_work,
+                            K_MSEC(async_init_delay[ASYNC_INIT_STEP_POWER_UP] +
+                                   CONFIG_PMW3610_CUSTOM_INIT_RETRY_DELAY_MS));
+        } else {
+            LOG_ERR("PMW3610 initialization failed in step %d", data->async_init_step);
+            LOG_ERR("PMW3610 init failed after %u retries", data->init_retry_count);
+        }
+        return;
     } else {
         data->async_init_step++;
 
         if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
             data->ready = true; // sensor is ready to work
+            data->init_retry_count = 0;
             LOG_INF("PMW3610 initialized");
             pmw3610_set_interrupt(dev, true);
-        } else {
-            k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
-        }
-    }
-}
+            uint32_t pending_cpi = (uint32_t)atomic_get(&data->pending_cpi);
+              if (pending_cpi != 0) {
+                  int err = pmw3610_set_cpi(dev, pending_cpi);
+                  if (err) {
+                      LOG_WRN("Failed to apply pending CPI %u (%d)", pending_cpi, err);
+                  } else {
+                      atomic_set(&data->pending_cpi, 0);
+                      LOG_INF("Applied pending CPI %u", pending_cpi);
+                  }
+              }
+          } else {
+              k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
+          }
+      }
+  }
 
 static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
@@ -535,10 +559,10 @@ static int pmw3610_init_irq(const struct device *dev) {
     return err;
 }
 
-static int pmw3610_init(const struct device *dev) {
-    struct pixart_data *data = dev->data;
-    const struct pixart_config *config = dev->config;
-    int err;
+  static int pmw3610_init(const struct device *dev) {
+      struct pixart_data *data = dev->data;
+      const struct pixart_config *config = dev->config;
+      int err;
 
 	if (!spi_is_ready_dt(&config->spi)) {
 		LOG_ERR("%s is not ready", config->spi.bus->name);
@@ -547,6 +571,8 @@ static int pmw3610_init(const struct device *dev) {
 
     // init device pointer
     data->dev = dev;
+    atomic_set(&data->pending_cpi, 0);
+    data->init_retry_count = 0;
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;
@@ -572,19 +598,25 @@ static int pmw3610_init(const struct device *dev) {
     return err;
 }
 
-static int pmw3610_attr_set(const struct device *dev, enum sensor_channel chan,
-                            enum sensor_attribute attr, const struct sensor_value *val) {
-    struct pixart_data *data = dev->data;
-    int err;
+  static int pmw3610_attr_set(const struct device *dev, enum sensor_channel chan,
+                              enum sensor_attribute attr, const struct sensor_value *val) {
+      struct pixart_data *data = dev->data;
+      int err;
 
-    if (unlikely(chan != SENSOR_CHAN_ALL)) {
-        return -ENOTSUP;
-    }
+      if (unlikely(chan != SENSOR_CHAN_ALL)) {
+          return -ENOTSUP;
+      }
 
-    if (unlikely(!data->ready)) {
-        LOG_DBG("Device is not initialized yet");
-        return -EBUSY;
-    }
+      if (unlikely(!data->ready)) {
+          if ((uint32_t)attr == PMW3610_ATTR_CPI) {
+              uint32_t cpi = PMW3610_SVALUE_TO_CPI(*val);
+              atomic_set(&data->pending_cpi, (atomic_val_t)cpi);
+              LOG_INF("Queued CPI %u", cpi);
+              return 0;
+          }
+          LOG_DBG("Device is not initialized yet");
+          return -EBUSY;
+      }
 
     switch ((uint32_t)attr) {
     case PMW3610_ATTR_CPI:

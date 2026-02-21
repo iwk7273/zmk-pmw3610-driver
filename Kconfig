@@ -35,6 +35,19 @@ config PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS
     Default minimum init power up delay is 10ms.
     Use this config to postpone init power up sequence if needs longer bootup time.
 
+config PMW3610_CUSTOM_INIT_RETRY_COUNT
+  int "PMW3610 init retry count"
+  default 3
+  help
+    Maximum number of retries when PMW3610 initialization fails.
+    Set to 0 to disable retries.
+
+config PMW3610_CUSTOM_INIT_RETRY_DELAY_MS
+  int "PMW3610 init retry delay (ms)"
+  default 200
+  help
+    Additional delay before retrying PMW3610 initialization after a failure.
+
 config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 	int "PMW3610's default minimum report rate"
 	default 0
