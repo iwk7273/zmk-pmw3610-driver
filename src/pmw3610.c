@@ -221,6 +221,7 @@ static int pmw3610_set_downshift_time(const struct device *dev, uint8_t reg_addr
 
 static int pmw3610_set_performance(const struct device *dev, bool enabled) {
     const struct pixart_config *config = dev->config;
+    struct pixart_data *data = dev->data;
     int err = 0;
 
     if (config->force_awake) {
@@ -248,6 +249,8 @@ static int pmw3610_set_performance(const struct device *dev, bool enabled) {
             perf |= 0xF0; // set bit[3..0] to 0xF (force awake)
         }
         if (perf != value) {
+            data->data_index = 0;
+            data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
             err = pmw3610_write(dev, PMW3610_REG_PERFORMANCE, perf);
             if (err) {
                 LOG_ERR("Can't write performance register %d", err);
@@ -396,6 +399,9 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
             data->ready = true; // sensor is ready to work
             data->init_retry_count = 0;
+            data->data_index = 0;
+            data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+            data->last_data = k_uptime_get();
             LOG_INF("PMW3610 initialized");
             pmw3610_set_interrupt(dev, true);
             uint32_t pending_cpi = (uint32_t)atomic_get(&data->pending_cpi);
@@ -419,6 +425,16 @@ static int pmw3610_report_data(const struct device *dev) {
     const struct pixart_config *config = dev->config;
     uint8_t buf[PMW3610_BURST_SIZE];
 
+#if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0 ||                                               \
+    IS_ENABLED(CONFIG_PMW3610_CUSTOM_IGNORE_AFTER_REST) ||                                         \
+    IS_ENABLED(CONFIG_PMW3610_CUSTOM_ANTI_WARP)
+    int64_t now = k_uptime_get();
+#endif
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_IGNORE_AFTER_REST) ||                                          \
+    IS_ENABLED(CONFIG_PMW3610_CUSTOM_ANTI_WARP)
+    int64_t passed = now - (int64_t)data->last_data;
+#endif
+
     if (unlikely(!data->ready)) {
         LOG_WRN("Device is not initialized yet");
         return -EBUSY;
@@ -430,7 +446,6 @@ static int pmw3610_report_data(const struct device *dev) {
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
     static int64_t last_smp_time = 0;
     static int64_t last_rpt_time = 0;
-    int64_t now = k_uptime_get();
 #endif
 
 	int err = pmw3610_read(dev, PMW3610_REG_MOTION_BURST, buf, PMW3610_BURST_SIZE);
@@ -459,6 +474,26 @@ static int pmw3610_report_data(const struct device *dev) {
     y = -y;
 #endif
 
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_IGNORE_AFTER_REST)
+    if (passed > CONFIG_PMW3610_CUSTOM_RUN_DOWNSHIFT_TIME_MS +
+                     CONFIG_PMW3610_CUSTOM_REST1_DOWNSHIFT_TIME_MS +
+                     CONFIG_PMW3610_CUSTOM_REST2_DOWNSHIFT_TIME_MS) {
+        data->data_index = 0;
+        data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+    }
+#endif
+
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_ANTI_WARP)
+    if (passed > CONFIG_PMW3610_CUSTOM_ANTI_WARP_INACTIVITY_MS &&
+        (x > CONFIG_PMW3610_CUSTOM_ANTI_WARP_THRES || y > CONFIG_PMW3610_CUSTOM_ANTI_WARP_THRES) &&
+        data->data_ready) {
+        data->last_data = now;
+        data->data_index = CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N / 2;
+        data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+        LOG_WRN("Discarded large movement after inactivity, likely warping");
+    }
+#endif
+
 #ifdef CONFIG_PMW3610_CUSTOM_SMART_ALGORITHM
     int16_t shutter = ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8) 
                     + buf[PMW3610_SHUTTER_L_POS];
@@ -471,6 +506,18 @@ static int pmw3610_report_data(const struct device *dev) {
         data->sw_smart_flag = true;
     }
 #endif
+
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_IGNORE_AFTER_REST) ||                                          \
+    IS_ENABLED(CONFIG_PMW3610_CUSTOM_ANTI_WARP)
+    data->last_data = now;
+#endif
+
+    if (!data->data_ready) {
+        if (++data->data_index >= CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N) {
+            data->data_ready = true;
+        }
+        return 0;
+    }
 
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
     // purge accumulated delta, if last sampled had not been reported on last report tick
@@ -576,6 +623,9 @@ static int pmw3610_init_irq(const struct device *dev) {
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;
+    data->data_index = 0;
+    data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+    data->last_data = k_uptime_get();
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
@@ -710,7 +760,13 @@ static int on_activity_state(const zmk_event_t *eh) {
 
     bool enable = state_ev->state == ZMK_ACTIVITY_ACTIVE ? 1 : 0;
     for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
+        struct pixart_data *data = pmw3610_devs[i]->data;
         pmw3610_set_performance(pmw3610_devs[i], enable);
+        if (!enable) {
+            data->data_index = 0;
+            data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+            data->last_data = k_uptime_get();
+        }
     }
 
     return 0;

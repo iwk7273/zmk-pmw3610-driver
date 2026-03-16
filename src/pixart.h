@@ -31,6 +31,9 @@ struct pixart_data {
     bool                         ready; // whether init is finished successfully
     int                          err; // error code during async init
     atomic_t                     pending_cpi; // pending CPI before ready (0 = none)
+    bool                         data_ready; // whether movement data can be reported
+    uint8_t                      data_index; // count ignored events before reporting
+    uint64_t                     last_data; // last motion sample timestamp (ms)
 };
 
 // device config data structure
