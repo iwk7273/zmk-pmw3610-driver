@@ -41,15 +41,48 @@ struct pixart_data {
     uint32_t                     trace_window_id;
     int64_t                      trace_window_start_ms;
     int64_t                      trace_window_until_ms;
-    int64_t                      trace_last_irq_report_ms;
-    uint32_t                     trace_irq_count;
+    int64_t                      trace_last_summary_ms;
+
+    /* Window totals */
     uint32_t                     trace_motion_count;
     uint32_t                     trace_report_x_count;
     uint32_t                     trace_report_y_count;
+    uint32_t                     trace_report_count;
+    uint32_t                     trace_raw_nonzero_count;
+    uint32_t                     trace_raw_neg11_count;
+    uint32_t                     trace_burst_xy_ff_count;
+    uint32_t                     trace_burst_all_ff_count;
+    uint32_t                     trace_irq_low_event_count;
+    uint32_t                     trace_irq_low_sticky_count;
+    uint64_t                     trace_irq_low_total_ms;
+
+    /* Period counters for summary logs */
+    uint32_t                     trace_irq_count;
+    uint32_t                     trace_period_sample_count;
+    uint32_t                     trace_period_report_count;
+    uint32_t                     trace_period_raw_nonzero_count;
+    uint32_t                     trace_period_raw_neg11_count;
+    uint32_t                     trace_period_burst_xy_ff_count;
+    uint32_t                     trace_period_burst_all_ff_count;
+    uint32_t                     trace_period_irq_low_sticky_count;
+    uint32_t                     trace_period_same_delta_max;
+
+    /* Anomaly state */
+    bool                         trace_anomaly_active;
+    int64_t                      trace_anomaly_start_ms;
+    uint32_t                     trace_anomaly_zero_streak;
+
+    /* IRQ LOW stretch tracking */
+    bool                         trace_irq_low_active;
+    bool                         trace_irq_low_sticky_marked;
+    int64_t                      trace_irq_low_start_ms;
+
+    /* Same delta run tracking */
     bool                         trace_have_last_delta;
     int16_t                      trace_last_rx;
     int16_t                      trace_last_ry;
     uint32_t                     trace_same_delta_run;
+    uint32_t                     trace_same_delta_max;
 #endif
 };
 
