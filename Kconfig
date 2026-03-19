@@ -76,6 +76,14 @@ config PMW3610_CUSTOM_REINIT_ON_WAKE
     initialization flow (power-up reset, self-test, and register setup).
     This helps recover from wake-time sensor read corruption.
 
+config PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS
+  int "Delay between PMW3610 wakeup and reset during reinit (ms)"
+  default 15
+  range 0 200
+  help
+    Additional delay inserted between wakeup command (0x96) and reset command
+    (0x5A) in PMW3610 power-up step. Used by wake-time reinitialization.
+
 config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 	int "PMW3610's default minimum report rate"
 	default 0

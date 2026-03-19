@@ -685,8 +685,10 @@ static void pmw3610_reset_runtime_state(struct pixart_data *data) {
 }
 
 #if IS_ENABLED(CONFIG_PMW3610_CUSTOM_REINIT_ON_WAKE)
-static int pmw3610_reinit_on_wake(const struct device *dev) {
+static int pmw3610_reinit_on_wake(const struct device *dev, enum zmk_activity_state state) {
     struct pixart_data *data = dev->data;
+    bool ready_before = data->ready;
+    bool data_ready_before = data->data_ready;
 
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
     (void)k_work_cancel_delayable(&data->trace_window_work);
@@ -700,7 +702,12 @@ static int pmw3610_reinit_on_wake(const struct device *dev) {
     data->reinit_in_progress = true;
     data->reinit_skip_irq_reenable = true;
 
-    pmw3610_set_interrupt(dev, false);
+    int irq_disable_ret = pmw3610_set_interrupt(dev, false);
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    LOG_INF("TRACE reinit start state=%d ready=%d data_ready=%d irq_disable=%d", state, ready_before,
+            data_ready_before, irq_disable_ret);
+#endif
+
     pmw3610_reset_runtime_state(data);
     k_work_schedule(&data->init_work, K_MSEC(async_init_delay[ASYNC_INIT_STEP_POWER_UP]));
     LOG_INF("PMW3610 wake reinit scheduled");
@@ -709,8 +716,31 @@ static int pmw3610_reinit_on_wake(const struct device *dev) {
 }
 #endif
 
+static int pmw3610_send_power_up_sequence(const struct device *dev) {
+    int wakeup_ret =
+        pmw3610_write(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_WAKEUP);
+    if (wakeup_ret) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        LOG_INF("TRACE step0 power-up wakeup_ret=%d reset_ret=%d wake_delay_ms=%d", wakeup_ret,
+                wakeup_ret, CONFIG_PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS);
+#endif
+        return wakeup_ret;
+    }
+
+    if (CONFIG_PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS > 0) {
+        k_sleep(K_MSEC(CONFIG_PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS));
+    }
+
+    int reset_ret = pmw3610_write(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    LOG_INF("TRACE step0 power-up wakeup_ret=%d reset_ret=%d wake_delay_ms=%d", wakeup_ret,
+            reset_ret, CONFIG_PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS);
+#endif
+    return reset_ret;
+}
+
 static int pmw3610_async_init_power_up(const struct device *dev) {
-	int ret = pmw3610_write_reg(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
+	int ret = pmw3610_send_power_up_sequence(dev);
     if (ret < 0) {
         return ret;
     }
@@ -722,6 +752,7 @@ static int pmw3610_async_init_clear_ob1(const struct device *dev) {
 }
 
 static int pmw3610_async_init_check_ob1(const struct device *dev) {
+    struct pixart_data *data = dev->data;
     uint8_t value;
     int err = pmw3610_read_reg(dev, PMW3610_REG_OBSERVATION, &value);
     if (err) {
@@ -730,7 +761,19 @@ static int pmw3610_async_init_check_ob1(const struct device *dev) {
     }
 
     if ((value & 0x0F) != 0x0F) {
-        LOG_ERR("Failed self-test (0x%x)", value);
+        uint8_t product_id = 0x00;
+        int product_err = pmw3610_read_reg(dev, PMW3610_REG_PRODUCT_ID, &product_id);
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        LOG_INF("TRACE step2 fail observation=0x%x product_id_ret=%d product_id=0x%x retry=%u",
+                value, product_err, product_id, data->init_retry_count);
+#endif
+        if (product_err) {
+            LOG_ERR("Failed self-test (obs=0x%x, product_id_err=%d, retry=%u)", value, product_err,
+                    data->init_retry_count);
+        } else {
+            LOG_ERR("Failed self-test (obs=0x%x, product_id=0x%x, retry=%u)", value, product_id,
+                    data->init_retry_count);
+        }
         return -EINVAL;
     }
 
@@ -826,6 +869,13 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         } else {
             LOG_ERR("PMW3610 initialization failed in step %d", data->async_init_step);
             LOG_ERR("PMW3610 init failed after %u retries", data->init_retry_count);
+            data->ready = false;
+            data->reinit_in_progress = false;
+            data->reinit_skip_irq_reenable = true;
+            pmw3610_set_interrupt(dev, false);
+            if (IS_ENABLED(CONFIG_PMW3610_CUSTOM_REINIT_ON_WAKE)) {
+                LOG_ERR("PMW3610 reinit terminal fail, sensor disabled");
+            }
         }
         return;
     } else {
@@ -1241,7 +1291,7 @@ static int on_activity_state(const zmk_event_t *eh) {
 #endif
         if (enable) {
 #if IS_ENABLED(CONFIG_PMW3610_CUSTOM_REINIT_ON_WAKE)
-            pmw3610_reinit_on_wake(pmw3610_devs[i]);
+            pmw3610_reinit_on_wake(pmw3610_devs[i], state_ev->state);
 #else
             pmw3610_set_performance(pmw3610_devs[i], true);
 #endif
