@@ -56,6 +56,169 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
     [ASYNC_INIT_STEP_CONFIGURE] = pmw3610_async_init_configure,
 };
 
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+static void pmw3610_trace_flush_same_delta(struct pixart_data *data) {
+    if (!data->trace_have_last_delta || data->trace_same_delta_run <= 1U) {
+        return;
+    }
+
+    LOG_INF("TRACE same-delta id=%u rx=%d ry=%d repeats=%u", data->trace_window_id,
+            data->trace_last_rx, data->trace_last_ry, data->trace_same_delta_run);
+    data->trace_same_delta_run = 0U;
+}
+
+static void pmw3610_trace_reset_window_counters(struct pixart_data *data) {
+    data->trace_irq_count = 0U;
+    data->trace_motion_count = 0U;
+    data->trace_report_x_count = 0U;
+    data->trace_report_y_count = 0U;
+    data->trace_have_last_delta = false;
+    data->trace_last_rx = 0;
+    data->trace_last_ry = 0;
+    data->trace_same_delta_run = 0U;
+}
+
+static void pmw3610_trace_finish_window(struct pixart_data *data, const char *reason) {
+    if (!data->trace_window_active) {
+        return;
+    }
+
+    pmw3610_trace_flush_same_delta(data);
+    int64_t now = k_uptime_get();
+    int64_t elapsed = now - data->trace_window_start_ms;
+    LOG_INF("TRACE window end id=%u reason=%s elapsed_ms=%lld motion=%u reports_x=%u reports_y=%u",
+            data->trace_window_id, reason, (long long)elapsed, data->trace_motion_count,
+            data->trace_report_x_count, data->trace_report_y_count);
+    data->trace_window_active = false;
+}
+
+static bool pmw3610_trace_is_window_active(struct pixart_data *data) {
+    if (!data->trace_window_active) {
+        return false;
+    }
+
+    if (k_uptime_get() <= data->trace_window_until_ms) {
+        return true;
+    }
+
+    pmw3610_trace_finish_window(data, "timeout");
+    return false;
+}
+
+static void pmw3610_trace_start_window(struct pixart_data *data, const char *reason, int state) {
+    int64_t now = k_uptime_get();
+    if (data->trace_window_active) {
+        pmw3610_trace_finish_window(data, "restart");
+    }
+
+    data->trace_window_active = true;
+    data->trace_window_id++;
+    data->trace_window_start_ms = now;
+    data->trace_window_until_ms = now + CONFIG_PMW3610_CUSTOM_TRACE_WINDOW_MS;
+    data->trace_last_irq_report_ms = now;
+    pmw3610_trace_reset_window_counters(data);
+
+    LOG_INF("TRACE window start id=%u reason=%s state=%d start_ms=%lld duration_ms=%d ready=%d "
+            "data_ready=%d idx=%u",
+            data->trace_window_id, reason, state, (long long)now,
+            CONFIG_PMW3610_CUSTOM_TRACE_WINDOW_MS, data->ready, data->data_ready, data->data_index);
+}
+
+static void pmw3610_trace_log_activity_state(struct pixart_data *data, int state) {
+    int64_t now = k_uptime_get();
+    LOG_INF("TRACE activity state=%d now_ms=%lld ready=%d data_ready=%d idx=%u", state,
+            (long long)now, data->ready, data->data_ready, data->data_index);
+    pmw3610_trace_start_window(data, "activity_state", state);
+}
+
+static void pmw3610_trace_log_perf_transition(struct pixart_data *data, bool enabled, uint8_t before,
+                                              uint8_t after, bool changed) {
+    LOG_INF("TRACE performance enabled=%d before=0x%x after=0x%x changed=%d data_ready=%d idx=%u",
+            enabled, before, after, changed, data->data_ready, data->data_index);
+}
+
+static void pmw3610_trace_on_irq(struct pixart_data *data) {
+    if (!pmw3610_trace_is_window_active(data)) {
+        return;
+    }
+
+    data->trace_irq_count++;
+}
+
+static void pmw3610_trace_maybe_report_irq_rate(struct pixart_data *data) {
+    if (!pmw3610_trace_is_window_active(data)) {
+        return;
+    }
+
+    int64_t now = k_uptime_get();
+    int64_t span = now - data->trace_last_irq_report_ms;
+    if (span < CONFIG_PMW3610_CUSTOM_TRACE_IRQ_REPORT_MS) {
+        return;
+    }
+
+    uint32_t rate_per_s = 0U;
+    if (span > 0) {
+        rate_per_s = (uint32_t)(((uint64_t)data->trace_irq_count * 1000U) / (uint64_t)span);
+    }
+
+    LOG_INF("TRACE irq-rate id=%u count=%u span_ms=%lld rate_per_s=%u", data->trace_window_id,
+            data->trace_irq_count, (long long)span, rate_per_s);
+    data->trace_irq_count = 0U;
+    data->trace_last_irq_report_ms = now;
+}
+
+static void pmw3610_trace_log_motion_sample(struct pixart_data *data, int16_t raw_x, int16_t raw_y,
+                                            int16_t adj_x, int16_t adj_y, bool ignored) {
+    if (!pmw3610_trace_is_window_active(data)) {
+        return;
+    }
+
+    data->trace_motion_count++;
+    if (!(raw_x || raw_y || adj_x || adj_y || ignored)) {
+        return;
+    }
+
+    LOG_INF("TRACE motion id=%u n=%u raw=%d/%d adj=%d/%d ignored=%d data_ready=%d idx=%u",
+            data->trace_window_id, data->trace_motion_count, raw_x, raw_y, adj_x, adj_y, ignored,
+            data->data_ready, data->data_index);
+}
+
+static void pmw3610_trace_log_report_emit(struct pixart_data *data, int16_t rx, int16_t ry) {
+    if (!pmw3610_trace_is_window_active(data)) {
+        return;
+    }
+
+    if (rx != 0) {
+        data->trace_report_x_count++;
+    }
+    if (ry != 0) {
+        data->trace_report_y_count++;
+    }
+
+    if (!data->trace_have_last_delta) {
+        data->trace_have_last_delta = true;
+        data->trace_last_rx = rx;
+        data->trace_last_ry = ry;
+        data->trace_same_delta_run = 1U;
+        LOG_INF("TRACE report id=%u rx=%d ry=%d reports_x=%u reports_y=%u", data->trace_window_id,
+                rx, ry, data->trace_report_x_count, data->trace_report_y_count);
+        return;
+    }
+
+    if (rx == data->trace_last_rx && ry == data->trace_last_ry) {
+        data->trace_same_delta_run++;
+        return;
+    }
+
+    pmw3610_trace_flush_same_delta(data);
+    data->trace_last_rx = rx;
+    data->trace_last_ry = ry;
+    data->trace_same_delta_run = 1U;
+    LOG_INF("TRACE report id=%u rx=%d ry=%d reports_x=%u reports_y=%u", data->trace_window_id, rx,
+            ry, data->trace_report_x_count, data->trace_report_y_count);
+}
+#endif // CONFIG_PMW3610_CUSTOM_TRACE
+
 //////// Function definitions //////////
 
 static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
@@ -248,7 +411,8 @@ static int pmw3610_set_performance(const struct device *dev, bool enabled) {
         if (enabled) {
             perf |= 0xF0; // set bit[3..0] to 0xF (force awake)
         }
-        if (perf != value) {
+        bool perf_changed = perf != value;
+        if (perf_changed) {
             data->data_index = 0;
             data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
             err = pmw3610_write(dev, PMW3610_REG_PERFORMANCE, perf);
@@ -258,6 +422,9 @@ static int pmw3610_set_performance(const struct device *dev, bool enabled) {
             }
             LOG_INF("Set performance register (reg value 0x%x)", perf);
         }
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        pmw3610_trace_log_perf_transition(data, enabled, value, perf, perf_changed);
+#endif
         LOG_INF("%s performance mode", enabled ? "enable" : "disable");
     }
 
@@ -458,8 +625,10 @@ static int pmw3610_report_data(const struct device *dev) {
 // adapted from https://stackoverflow.com/questions/70802306/convert-a-12-bit-signed-number-in-c
 #define TOINT16(val, bits) (((struct { int16_t value : bits; }){val}).value)
 
-    int16_t x = TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12);
-    int16_t y = TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12);
+    int16_t raw_x = TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12);
+    int16_t raw_y = TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12);
+    int16_t x = raw_x;
+    int16_t y = raw_y;
     LOG_DBG("x/y: %d/%d", x, y);
 
 #if IS_ENABLED(CONFIG_PMW3610_CUSTOM_SWAP_XY)
@@ -512,6 +681,11 @@ static int pmw3610_report_data(const struct device *dev) {
     data->last_data = now;
 #endif
 
+    bool ignored_sample = !data->data_ready;
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    pmw3610_trace_log_motion_sample(data, raw_x, raw_y, x, y, ignored_sample);
+#endif
+
     if (!data->data_ready) {
         if (++data->data_index >= CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N) {
             data->data_ready = true;
@@ -551,6 +725,9 @@ static int pmw3610_report_data(const struct device *dev) {
 #endif
         dx = 0;
         dy = 0;
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        pmw3610_trace_log_report_emit(data, rx, ry);
+#endif
         if (have_x) {
             input_report(dev, config->evt_type, config->x_input_code, rx, !have_y, K_NO_WAIT);
         }
@@ -566,6 +743,9 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
                                   uint32_t pins) {
     struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, irq_gpio_cb);
     const struct device *dev = data->dev;
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    pmw3610_trace_on_irq(data);
+#endif
     pmw3610_set_interrupt(dev, false);
     k_work_submit(&data->trigger_work);
 }
@@ -574,6 +754,9 @@ static void pmw3610_work_callback(struct k_work *work) {
     struct pixart_data *data = CONTAINER_OF(work, struct pixart_data, trigger_work);
     const struct device *dev = data->dev;
     pmw3610_report_data(dev);
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    pmw3610_trace_maybe_report_irq_rate(data);
+#endif
     pmw3610_set_interrupt(dev, true);
 }
 
@@ -626,6 +809,14 @@ static int pmw3610_init_irq(const struct device *dev) {
     data->data_index = 0;
     data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
     data->last_data = k_uptime_get();
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    data->trace_window_active = false;
+    data->trace_window_id = 0U;
+    data->trace_window_start_ms = 0;
+    data->trace_window_until_ms = 0;
+    data->trace_last_irq_report_ms = 0;
+    pmw3610_trace_reset_window_counters(data);
+#endif
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
@@ -761,6 +952,9 @@ static int on_activity_state(const zmk_event_t *eh) {
     bool enable = state_ev->state == ZMK_ACTIVITY_ACTIVE ? 1 : 0;
     for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
         struct pixart_data *data = pmw3610_devs[i]->data;
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        pmw3610_trace_log_activity_state(data, state_ev->state);
+#endif
         pmw3610_set_performance(pmw3610_devs[i], enable);
         if (!enable) {
             data->data_index = 0;

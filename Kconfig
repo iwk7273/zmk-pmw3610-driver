@@ -76,6 +76,31 @@ config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 		Slow down input reporting for hid queue over the air.
 		Turn value down to 8ms to get sharp response if use with USB only.
 
+config PMW3610_CUSTOM_TRACE
+  bool "Enable PMW3610 resume trace logging"
+  default n
+  help
+    Enable temporary diagnostic logs to trace burst motion around
+    activity/sleep resume transitions without changing behavior.
+
+if PMW3610_CUSTOM_TRACE
+
+config PMW3610_CUSTOM_TRACE_WINDOW_MS
+  int "PMW3610 trace window duration (ms)"
+  default 5000
+  range 100 60000
+  help
+    Duration of each trace window after an activity state change.
+
+config PMW3610_CUSTOM_TRACE_IRQ_REPORT_MS
+  int "PMW3610 trace IRQ rate report interval (ms)"
+  default 1000
+  range 100 10000
+  help
+    Interval used to summarize IRQ callback rate during an active trace window.
+
+endif # PMW3610_CUSTOM_TRACE
+
 config PMW3610_CUSTOM_SMART_ALGORITHM
   bool "Enable an algorithm of PMW3610 to enhance surface coverage"
   default y

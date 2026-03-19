@@ -11,6 +11,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/atomic.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,22 @@ struct pixart_data {
     bool                         data_ready; // whether movement data can be reported
     uint8_t                      data_index; // count ignored events before reporting
     uint64_t                     last_data; // last motion sample timestamp (ms)
+
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    bool                         trace_window_active;
+    uint32_t                     trace_window_id;
+    int64_t                      trace_window_start_ms;
+    int64_t                      trace_window_until_ms;
+    int64_t                      trace_last_irq_report_ms;
+    uint32_t                     trace_irq_count;
+    uint32_t                     trace_motion_count;
+    uint32_t                     trace_report_x_count;
+    uint32_t                     trace_report_y_count;
+    bool                         trace_have_last_delta;
+    int16_t                      trace_last_rx;
+    int16_t                      trace_last_ry;
+    uint32_t                     trace_same_delta_run;
+#endif
 };
 
 // device config data structure
