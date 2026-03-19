@@ -456,6 +456,50 @@ static void pmw3610_trace_maybe_report_irq_rate(struct pixart_data *data) {
 
 static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
 	const struct pixart_config *cfg = dev->config;
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING)
+	struct spi_config spi_cfg = cfg->spi.config;
+	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
+	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
+	const struct spi_buf rx_buf = { .buf = value, .len = len };
+	const struct spi_buf_set rx = { .buffers = &rx_buf, .count = 1 };
+
+	spi_cfg.operation |= (SPI_HOLD_ON_CS | SPI_LOCK_ON);
+
+	int err = spi_write(cfg->spi.bus, &spi_cfg, &tx);
+	if (err) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+		LOG_INF("TRACE strict read fail phase=addr addr=0x%x err=%d", addr, err);
+#endif
+		int release_err = spi_release(cfg->spi.bus, &spi_cfg);
+		if (release_err) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+			LOG_INF("TRACE strict read fail phase=release addr=0x%x err=%d", addr, release_err);
+#endif
+		}
+		return err;
+	}
+
+	k_busy_wait(T_SRAD_DELAY_US);
+
+	err = spi_read(cfg->spi.bus, &spi_cfg, &rx);
+	if (err) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+		LOG_INF("TRACE strict read fail phase=data addr=0x%x err=%d", addr, err);
+#endif
+	}
+
+	int release_err = spi_release(cfg->spi.bus, &spi_cfg);
+	if (release_err) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+		LOG_INF("TRACE strict read fail phase=release addr=0x%x err=%d", addr, release_err);
+#endif
+		if (err == 0) {
+			err = release_err;
+		}
+	}
+
+	return err;
+#else
 	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
 	struct spi_buf rx_buf[] = {
@@ -464,6 +508,7 @@ static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, 
 	};
 	const struct spi_buf_set rx = { .buffers = rx_buf, .count = ARRAY_SIZE(rx_buf) };
 	return spi_transceive_dt(&cfg->spi, &tx, &rx);
+#endif
 }
 
 static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
@@ -478,17 +523,37 @@ static int pmw3610_write_reg(const struct device *dev, uint8_t addr, uint8_t val
 	return spi_write_dt(&cfg->spi, &tx);
 }
 
+static inline void pmw3610_wait_tSWW_if_strict(void) {
+	if (IS_ENABLED(CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING)) {
+		k_busy_wait(T_SWW_DELAY_US);
+	}
+}
+
+static int pmw3610_write_reg_with_timing(const struct device *dev, uint8_t addr, uint8_t value) {
+	int err = pmw3610_write_reg(dev, addr, value);
+	if (err) {
+		return err;
+	}
+
+	pmw3610_wait_tSWW_if_strict();
+	return 0;
+}
+
 static int pmw3610_write(const struct device *dev, uint8_t reg, uint8_t val) {
-	pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_ENABLE);
+	int err = pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ,
+	                                        PMW3610_SPI_CLOCK_CMD_ENABLE);
+	if (err) {
+		return err;
+	}
 	k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
 
-    int err = pmw3610_write_reg(dev, reg, val);
+    err = pmw3610_write_reg_with_timing(dev, reg, val);
     if (unlikely(err != 0)) {
         return err;
     }
-    
-    pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
-    return 0;
+
+    return pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ,
+                                         PMW3610_SPI_CLOCK_CMD_DISABLE);
 }
 
 static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
@@ -512,19 +577,27 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
     uint8_t addr[] = {0x7F, PMW3610_REG_RES_STEP, 0x7F};
     uint8_t data[] = {0xFF, value, 0x00};
 
-	pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_ENABLE);
+	int err = pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ,
+	                                        PMW3610_SPI_CLOCK_CMD_ENABLE);
+	if (err) {
+		LOG_ERR("Failed to enable SPI clock for CPI write");
+		return err;
+	}
 	k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
 
     /* Write data */
-    int err;
     for (size_t i = 0; i < sizeof(data); i++) {
-        err = pmw3610_write_reg(dev, addr[i], data[i]);
+        err = pmw3610_write_reg_with_timing(dev, addr[i], data[i]);
         if (err) {
             LOG_ERR("Burst write failed on SPI write (data)");
             break;
         }
     }
-    pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
+    int disable_err =
+        pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
+    if (err == 0 && disable_err != 0) {
+        err = disable_err;
+    }
 
     if (err) {
         LOG_ERR("Failed to set CPI");
@@ -1150,6 +1223,9 @@ static int pmw3610_init_irq(const struct device *dev) {
     data->trace_window_until_ms = 0;
     data->trace_last_summary_ms = 0;
     pmw3610_trace_reset_window_counters(data);
+    LOG_INF("TRACE strict_spi strict=%d cs_delay_us=%d tsrad_us=%d tsww_us=%d",
+            IS_ENABLED(CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING), PMW3610_SPI_CS_DELAY_US,
+            T_SRAD_DELAY_US, T_SWW_DELAY_US);
 #endif
 
     // init trigger handler work
@@ -1254,7 +1330,7 @@ static const struct sensor_driver_api pmw3610_driver_api = {
 #define PMW3610_DEFINE(n)                                                                          \
     static struct pixart_data data##n;                                                             \
     static const struct pixart_config config##n = {                                                \
-		.spi = SPI_DT_SPEC_INST_GET(n, PMW3610_SPI_MODE, 0),		                               \
+		.spi = SPI_DT_SPEC_INST_GET(n, PMW3610_SPI_MODE, PMW3610_SPI_CS_DELAY_US),		       \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
         .evt_type = DT_PROP(DT_DRV_INST(n), evt_type),                                             \
