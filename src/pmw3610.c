@@ -48,6 +48,8 @@ static int pmw3610_async_init_power_up(const struct device *dev);
 static int pmw3610_async_init_clear_ob1(const struct device *dev);
 static int pmw3610_async_init_check_ob1(const struct device *dev);
 static int pmw3610_async_init_configure(const struct device *dev);
+static int pmw3610_write_reg(const struct device *dev, uint8_t addr, uint8_t value);
+static int pmw3610_write_reg_with_timing(const struct device *dev, uint8_t addr, uint8_t value);
 
 static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *dev) = {
     [ASYNC_INIT_STEP_POWER_UP] = pmw3610_async_init_power_up,
@@ -454,7 +456,7 @@ static void pmw3610_trace_maybe_report_irq_rate(struct pixart_data *data) {
 
 //////// Function definitions //////////
 
-static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
+static int pmw3610_read_raw(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
 	const struct pixart_config *cfg = dev->config;
 #if IS_ENABLED(CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING)
 	struct spi_config spi_cfg = cfg->spi.config;
@@ -509,6 +511,25 @@ static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, 
 	const struct spi_buf_set rx = { .buffers = rx_buf, .count = ARRAY_SIZE(rx_buf) };
 	return spi_transceive_dt(&cfg->spi, &tx, &rx);
 #endif
+}
+
+static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
+	int err = pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ,
+	                                        PMW3610_SPI_CLOCK_CMD_ENABLE);
+	if (err) {
+		return err;
+	}
+	k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
+
+	err = pmw3610_read_raw(dev, addr, value, len);
+
+	int disable_err =
+	    pmw3610_write_reg_with_timing(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
+	if (err == 0 && disable_err != 0) {
+		err = disable_err;
+	}
+
+	return err;
 }
 
 static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
@@ -826,39 +847,61 @@ static int pmw3610_async_init_clear_ob1(const struct device *dev) {
 
 static int pmw3610_async_init_check_ob1(const struct device *dev) {
     struct pixart_data *data = dev->data;
-    uint8_t value;
+    uint8_t value = 0x00;
+    uint8_t product_id = 0xFF;
+    uint8_t not_product_id = 0xFF;
     int err = pmw3610_read_reg(dev, PMW3610_REG_OBSERVATION, &value);
     if (err) {
         LOG_ERR("Can't do self-test");
         return err;
     }
 
-    if ((value & 0x0F) != 0x0F) {
-        uint8_t product_id = 0x00;
-        int product_err = pmw3610_read_reg(dev, PMW3610_REG_PRODUCT_ID, &product_id);
+    if (value == 0xFF) {
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
-        LOG_INF("TRACE step2 fail observation=0x%x product_id_ret=%d product_id=0x%x retry=%u",
-                value, product_err, product_id, data->init_retry_count);
+        LOG_INF("TRACE step2 fail reason=open-bus observation=0x%x product=0x%x not_prod=0x%x retry=%u",
+                value, product_id, not_product_id, data->init_retry_count);
 #endif
-        if (product_err) {
-            LOG_ERR("Failed self-test (obs=0x%x, product_id_err=%d, retry=%u)", value, product_err,
-                    data->init_retry_count);
-        } else {
-            LOG_ERR("Failed self-test (obs=0x%x, product_id=0x%x, retry=%u)", value, product_id,
-                    data->init_retry_count);
-        }
+        LOG_ERR("Failed self-test reason=open-bus (obs=0x%x, product=0x%x, not_prod=0x%x, retry=%u)",
+                value, product_id, not_product_id, data->init_retry_count);
+        return -EIO;
+    }
+
+    int product_err = pmw3610_read_reg(dev, PMW3610_REG_PRODUCT_ID, &product_id);
+    int not_product_err = pmw3610_read_reg(dev, PMW3610_REG_NOT_PROD_ID, &not_product_id);
+
+    if (product_err || not_product_err) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        LOG_INF("TRACE step2 fail reason=read-fail observation=0x%x product=0x%x not_prod=0x%x "
+                "product_err=%d not_prod_err=%d retry=%u",
+                value, product_id, not_product_id, product_err, not_product_err,
+                data->init_retry_count);
+#endif
+        LOG_ERR("Failed self-test reason=read-fail (obs=0x%x, product=0x%x, not_prod=0x%x, "
+                "product_err=%d, not_prod_err=%d, retry=%u)",
+                value, product_id, not_product_id, product_err, not_product_err,
+                data->init_retry_count);
+        return product_err ? product_err : not_product_err;
+    }
+
+    if ((value & 0x0F) != 0x0F) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        LOG_INF("TRACE step2 fail reason=obs-invalid observation=0x%x product=0x%x not_prod=0x%x "
+                "retry=%u",
+                value, product_id, not_product_id, data->init_retry_count);
+#endif
+        LOG_ERR("Failed self-test reason=obs-invalid (obs=0x%x, product=0x%x, not_prod=0x%x, retry=%u)",
+                value, product_id, not_product_id, data->init_retry_count);
         return -EINVAL;
     }
 
-    uint8_t product_id = 0x01;
-    err = pmw3610_read_reg(dev, PMW3610_REG_PRODUCT_ID, &product_id);
-    if (err) {
-        LOG_ERR("Cannot obtain product id");
-        return err;
-    }
-
-    if (product_id != PMW3610_PRODUCT_ID) {
-        LOG_ERR("Incorrect product id 0x%x (expecting 0x%x)!", product_id, PMW3610_PRODUCT_ID);
+    if (product_id != PMW3610_PRODUCT_ID || not_product_id != ((uint8_t)~PMW3610_PRODUCT_ID)) {
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+        LOG_INF("TRACE step2 fail reason=id-mismatch observation=0x%x product=0x%x not_prod=0x%x "
+                "retry=%u",
+                value, product_id, not_product_id, data->init_retry_count);
+#endif
+        LOG_ERR("Failed self-test reason=id-mismatch (obs=0x%x, product=0x%x, not_prod=0x%x, retry=%u)",
+                value, product_id, not_product_id, data->init_retry_count);
         return -EIO;
     }
 
