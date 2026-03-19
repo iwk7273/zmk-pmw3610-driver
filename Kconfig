@@ -68,6 +68,14 @@ config PMW3610_CUSTOM_INIT_RETRY_DELAY_MS
   help
     Additional delay before retrying PMW3610 initialization after a failure.
 
+config PMW3610_CUSTOM_REINIT_ON_WAKE
+  bool "Re-run PMW3610 async init on activity wake"
+  default n
+  help
+    When enabled, transition to ACTIVE state re-runs the full async PMW3610
+    initialization flow (power-up reset, self-test, and register setup).
+    This helps recover from wake-time sensor read corruption.
+
 config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 	int "PMW3610's default minimum report rate"
 	default 0

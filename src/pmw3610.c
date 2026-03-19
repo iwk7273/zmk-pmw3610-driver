@@ -674,6 +674,41 @@ static int pmw3610_set_interrupt(const struct device *dev, const bool en) {
     return ret;
 }
 
+static void pmw3610_reset_runtime_state(struct pixart_data *data) {
+    data->ready = false;
+    data->err = 0;
+    data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
+    data->init_retry_count = 0;
+    data->data_index = 0;
+    data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
+    data->last_data = k_uptime_get();
+}
+
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_REINIT_ON_WAKE)
+static int pmw3610_reinit_on_wake(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+
+#ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    (void)k_work_cancel_delayable(&data->trace_window_work);
+    if (data->trace_window_active) {
+        k_work_reschedule(&data->trace_window_work,
+                          K_MSEC(CONFIG_PMW3610_CUSTOM_TRACE_WINDOW_MS));
+    }
+#endif
+    (void)k_work_cancel_delayable(&data->init_work);
+
+    data->reinit_in_progress = true;
+    data->reinit_skip_irq_reenable = true;
+
+    pmw3610_set_interrupt(dev, false);
+    pmw3610_reset_runtime_state(data);
+    k_work_schedule(&data->init_work, K_MSEC(async_init_delay[ASYNC_INIT_STEP_POWER_UP]));
+    LOG_INF("PMW3610 wake reinit scheduled");
+
+    return 0;
+}
+#endif
+
 static int pmw3610_async_init_power_up(const struct device *dev) {
 	int ret = pmw3610_write_reg(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
     if (ret < 0) {
@@ -798,6 +833,8 @@ static int pmw3610_async_init_configure(const struct device *dev) {
 
         if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
             data->ready = true; // sensor is ready to work
+            data->reinit_in_progress = false;
+            data->reinit_skip_irq_reenable = false;
             data->init_retry_count = 0;
             data->data_index = 0;
             data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
@@ -976,6 +1013,12 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
                                   uint32_t pins) {
     struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, irq_gpio_cb);
     const struct device *dev = data->dev;
+
+    if (data->reinit_in_progress || !data->ready) {
+        pmw3610_set_interrupt(dev, false);
+        return;
+    }
+
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
     pmw3610_trace_on_irq(data);
 #endif
@@ -986,10 +1029,18 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
 static void pmw3610_work_callback(struct k_work *work) {
     struct pixart_data *data = CONTAINER_OF(work, struct pixart_data, trigger_work);
     const struct device *dev = data->dev;
+
+    if (data->reinit_in_progress || !data->ready) {
+        return;
+    }
+
     pmw3610_report_data(dev);
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
     pmw3610_trace_maybe_report_irq_rate(data);
 #endif
+    if (data->reinit_skip_irq_reenable) {
+        return;
+    }
     pmw3610_set_interrupt(dev, true);
 }
 
@@ -1035,13 +1086,12 @@ static int pmw3610_init_irq(const struct device *dev) {
     // init device pointer
     data->dev = dev;
     atomic_set(&data->pending_cpi, 0);
-    data->init_retry_count = 0;
+    data->reinit_in_progress = false;
+    data->reinit_skip_irq_reenable = false;
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;
-    data->data_index = 0;
-    data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
-    data->last_data = k_uptime_get();
+    pmw3610_reset_runtime_state(data);
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
     k_work_init_delayable(&data->trace_window_work, pmw3610_trace_window_work_callback);
     data->trace_window_active = false;
@@ -1189,8 +1239,14 @@ static int on_activity_state(const zmk_event_t *eh) {
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
         pmw3610_trace_log_activity_state(data, state_ev->state);
 #endif
-        pmw3610_set_performance(pmw3610_devs[i], enable);
-        if (!enable) {
+        if (enable) {
+#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_REINIT_ON_WAKE)
+            pmw3610_reinit_on_wake(pmw3610_devs[i]);
+#else
+            pmw3610_set_performance(pmw3610_devs[i], true);
+#endif
+        } else {
+            pmw3610_set_performance(pmw3610_devs[i], false);
             data->data_index = 0;
             data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
             data->last_data = k_uptime_get();
