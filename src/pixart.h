@@ -42,6 +42,7 @@ struct pixart_data {
     int64_t                      trace_window_start_ms;
     int64_t                      trace_window_until_ms;
     int64_t                      trace_last_summary_ms;
+    struct k_work_delayable      trace_window_work;
 
     /* Window totals */
     uint32_t                     trace_motion_count;

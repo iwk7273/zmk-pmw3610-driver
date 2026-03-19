@@ -62,6 +62,9 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
 #define PMW3610_TRACE_ANOMALY_END_ZERO_SAMPLES 24U
 #define PMW3610_TRACE_IRQ_LOW_STICKY_MS 200
 
+static void pmw3610_trace_flush_same_delta(struct pixart_data *data);
+static void pmw3610_trace_finish_window(struct pixart_data *data, const char *reason);
+
 static void pmw3610_trace_reset_period(struct pixart_data *data) {
     data->trace_irq_count = 0U;
     data->trace_period_sample_count = 0U;
@@ -85,6 +88,77 @@ static void pmw3610_trace_flush_same_delta(struct pixart_data *data) {
     if (data->trace_same_delta_run > data->trace_same_delta_max) {
         data->trace_same_delta_max = data->trace_same_delta_run;
     }
+}
+
+static bool pmw3610_trace_has_period_data(const struct pixart_data *data) {
+    return data->trace_period_sample_count != 0U || data->trace_period_report_count != 0U ||
+           data->trace_irq_count != 0U || data->trace_period_raw_nonzero_count != 0U ||
+           data->trace_period_raw_neg11_count != 0U || data->trace_period_burst_xy_ff_count != 0U ||
+           data->trace_period_burst_all_ff_count != 0U ||
+           data->trace_period_irq_low_sticky_count != 0U || data->trace_period_same_delta_max != 0U;
+}
+
+static void pmw3610_trace_emit_summary(struct pixart_data *data, int64_t now, const char *reason,
+                                       bool force) {
+    int64_t span = now - data->trace_last_summary_ms;
+    if (span < 0) {
+        span = 0;
+    }
+
+    if (!force && span < CONFIG_PMW3610_CUSTOM_TRACE_IRQ_REPORT_MS) {
+        return;
+    }
+
+    pmw3610_trace_flush_same_delta(data);
+    if (!pmw3610_trace_has_period_data(data)) {
+        data->trace_last_summary_ms = now;
+        return;
+    }
+
+    if (span == 0) {
+        span = 1;
+    }
+
+    uint32_t samples = data->trace_period_sample_count;
+    uint32_t samples_ps = (uint32_t)(((uint64_t)samples * 1000U) / (uint64_t)span);
+    uint32_t irqs = data->trace_irq_count;
+    uint32_t irqs_ps = (uint32_t)(((uint64_t)irqs * 1000U) / (uint64_t)span);
+    uint32_t reports = data->trace_period_report_count;
+    uint32_t reports_ps = (uint32_t)(((uint64_t)reports * 1000U) / (uint64_t)span);
+    uint32_t raw_neg11_pct =
+        (samples > 0U) ? (uint32_t)(((uint64_t)data->trace_period_raw_neg11_count * 100U) / samples)
+                       : 0U;
+    uint32_t burst_xy_ff_pct =
+        (samples > 0U)
+            ? (uint32_t)(((uint64_t)data->trace_period_burst_xy_ff_count * 100U) / samples)
+            : 0U;
+    uint32_t burst_all_ff_pct =
+        (samples > 0U)
+            ? (uint32_t)(((uint64_t)data->trace_period_burst_all_ff_count * 100U) / samples)
+            : 0U;
+    uint32_t current_irq_low_ms = 0U;
+    if (data->trace_irq_low_active && now > data->trace_irq_low_start_ms) {
+        current_irq_low_ms = (uint32_t)(now - data->trace_irq_low_start_ms);
+    }
+
+    LOG_INF("TRACE summary id=%u reason=%s span_ms=%lld samples=%u(%u/s) irq=%u(%u/s) reports=%u(%u/s) "
+            "raw_nonzero=%u raw_neg11=%u(%u%%) burst_xy_ff=%u(%u%%) burst_all_ff=%u(%u%%) "
+            "same_delta_max=%u current_same=%u irq_low_ms=%u irq_low_sticky=%u",
+            data->trace_window_id, reason, (long long)span, samples, samples_ps, irqs, irqs_ps,
+            reports, reports_ps, data->trace_period_raw_nonzero_count,
+            data->trace_period_raw_neg11_count, raw_neg11_pct, data->trace_period_burst_xy_ff_count,
+            burst_xy_ff_pct, data->trace_period_burst_all_ff_count, burst_all_ff_pct,
+            data->trace_period_same_delta_max, data->trace_same_delta_run, current_irq_low_ms,
+            data->trace_period_irq_low_sticky_count);
+
+    if (samples >= PMW3610_TRACE_MIN_RATIO_SAMPLES &&
+        burst_all_ff_pct >= PMW3610_TRACE_BURST_FF_WARN_PCT) {
+        LOG_INF("TRACE burst-ff-high id=%u burst_all_ff_pct=%u samples=%u", data->trace_window_id,
+                burst_all_ff_pct, samples);
+    }
+
+    data->trace_last_summary_ms = now;
+    pmw3610_trace_reset_period(data);
 }
 
 static void pmw3610_trace_reset_window_counters(struct pixart_data *data) {
@@ -123,6 +197,20 @@ static void pmw3610_trace_finish_window(struct pixart_data *data, const char *re
     }
 
     int64_t now = k_uptime_get();
+    if (data->trace_irq_low_active) {
+        int64_t low_ms = now - data->trace_irq_low_start_ms;
+        if (low_ms < 0) {
+            low_ms = 0;
+        }
+        if (!data->trace_irq_low_sticky_marked && low_ms >= PMW3610_TRACE_IRQ_LOW_STICKY_MS) {
+            data->trace_irq_low_sticky_count++;
+            data->trace_period_irq_low_sticky_count++;
+        }
+        data->trace_irq_low_total_ms += (uint64_t)low_ms;
+        data->trace_irq_low_active = false;
+        data->trace_irq_low_sticky_marked = false;
+    }
+
     if (data->trace_anomaly_active) {
         int64_t active_ms = now - data->trace_anomaly_start_ms;
         LOG_INF("TRACE anomaly end id=%u reason=%s active_ms=%lld", data->trace_window_id, reason,
@@ -130,7 +218,7 @@ static void pmw3610_trace_finish_window(struct pixart_data *data, const char *re
         data->trace_anomaly_active = false;
     }
 
-    pmw3610_trace_flush_same_delta(data);
+    pmw3610_trace_emit_summary(data, now, reason, true);
     int64_t elapsed = now - data->trace_window_start_ms;
     LOG_INF("TRACE window end id=%u reason=%s elapsed_ms=%lld samples=%u reports=%u raw_nonzero=%u "
             "raw_neg11=%u burst_xy_ff=%u burst_all_ff=%u irq_low_events=%u irq_low_sticky=%u "
@@ -142,6 +230,12 @@ static void pmw3610_trace_finish_window(struct pixart_data *data, const char *re
             (unsigned long long)data->trace_irq_low_total_ms, data->trace_same_delta_max);
 
     data->trace_window_active = false;
+}
+
+static void pmw3610_trace_window_work_callback(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct pixart_data *data = CONTAINER_OF(dwork, struct pixart_data, trace_window_work);
+    pmw3610_trace_finish_window(data, "timer");
 }
 
 static bool pmw3610_trace_is_window_active(struct pixart_data *data) {
@@ -174,6 +268,8 @@ static void pmw3610_trace_start_window(struct pixart_data *data, const char *rea
             "data_ready=%d idx=%u",
             data->trace_window_id, reason, state, (long long)now,
             CONFIG_PMW3610_CUSTOM_TRACE_WINDOW_MS, data->ready, data->data_ready, data->data_index);
+
+    k_work_reschedule(&data->trace_window_work, K_MSEC(CONFIG_PMW3610_CUSTOM_TRACE_WINDOW_MS));
 }
 
 static void pmw3610_trace_log_activity_state(struct pixart_data *data, int state) {
@@ -303,6 +399,7 @@ static void pmw3610_trace_log_motion_sample(struct pixart_data *data, int16_t ra
                         data->trace_window_id, (long long)active_ms);
                 data->trace_anomaly_active = false;
                 data->trace_anomaly_zero_streak = 0U;
+                pmw3610_trace_emit_summary(data, now, "anomaly_end", true);
             }
         }
     }
@@ -351,53 +448,7 @@ static void pmw3610_trace_maybe_report_irq_rate(struct pixart_data *data) {
     pmw3610_trace_sample_irq_level(data, "work");
 
     int64_t now = k_uptime_get();
-    int64_t span = now - data->trace_last_summary_ms;
-    if (span < CONFIG_PMW3610_CUSTOM_TRACE_IRQ_REPORT_MS) {
-        return;
-    }
-
-    pmw3610_trace_flush_same_delta(data);
-
-    uint32_t samples = data->trace_period_sample_count;
-    uint32_t samples_ps = (span > 0) ? (uint32_t)(((uint64_t)samples * 1000U) / (uint64_t)span) : 0U;
-    uint32_t irqs = data->trace_irq_count;
-    uint32_t irqs_ps = (span > 0) ? (uint32_t)(((uint64_t)irqs * 1000U) / (uint64_t)span) : 0U;
-    uint32_t reports = data->trace_period_report_count;
-    uint32_t reports_ps =
-        (span > 0) ? (uint32_t)(((uint64_t)reports * 1000U) / (uint64_t)span) : 0U;
-    uint32_t raw_neg11_pct =
-        (samples > 0) ? (uint32_t)(((uint64_t)data->trace_period_raw_neg11_count * 100U) / samples)
-                      : 0U;
-    uint32_t burst_xy_ff_pct =
-        (samples > 0)
-            ? (uint32_t)(((uint64_t)data->trace_period_burst_xy_ff_count * 100U) / samples)
-            : 0U;
-    uint32_t burst_all_ff_pct =
-        (samples > 0)
-            ? (uint32_t)(((uint64_t)data->trace_period_burst_all_ff_count * 100U) / samples)
-            : 0U;
-    uint32_t current_irq_low_ms = 0U;
-    if (data->trace_irq_low_active && now > data->trace_irq_low_start_ms) {
-        current_irq_low_ms = (uint32_t)(now - data->trace_irq_low_start_ms);
-    }
-
-    LOG_INF("TRACE summary id=%u span_ms=%lld samples=%u(%u/s) irq=%u(%u/s) reports=%u(%u/s) "
-            "raw_nonzero=%u raw_neg11=%u(%u%%) burst_xy_ff=%u(%u%%) burst_all_ff=%u(%u%%) "
-            "same_delta_max=%u current_same=%u irq_low_ms=%u irq_low_sticky=%u",
-            data->trace_window_id, (long long)span, samples, samples_ps, irqs, irqs_ps, reports,
-            reports_ps, data->trace_period_raw_nonzero_count, data->trace_period_raw_neg11_count,
-            raw_neg11_pct, data->trace_period_burst_xy_ff_count, burst_xy_ff_pct,
-            data->trace_period_burst_all_ff_count, burst_all_ff_pct, data->trace_period_same_delta_max,
-            data->trace_same_delta_run, current_irq_low_ms, data->trace_period_irq_low_sticky_count);
-
-    if (samples >= PMW3610_TRACE_MIN_RATIO_SAMPLES &&
-        burst_all_ff_pct >= PMW3610_TRACE_BURST_FF_WARN_PCT) {
-        LOG_INF("TRACE burst-ff-high id=%u burst_all_ff_pct=%u samples=%u", data->trace_window_id,
-                burst_all_ff_pct, samples);
-    }
-
-    data->trace_last_summary_ms = now;
-    pmw3610_trace_reset_period(data);
+    pmw3610_trace_emit_summary(data, now, "periodic", false);
 }
 #endif // CONFIG_PMW3610_CUSTOM_TRACE
 
@@ -992,6 +1043,7 @@ static int pmw3610_init_irq(const struct device *dev) {
     data->data_ready = (CONFIG_PMW3610_CUSTOM_IGNORE_FIRST_N == 0);
     data->last_data = k_uptime_get();
 #ifdef CONFIG_PMW3610_CUSTOM_TRACE
+    k_work_init_delayable(&data->trace_window_work, pmw3610_trace_window_work_callback);
     data->trace_window_active = false;
     data->trace_window_id = 0U;
     data->trace_window_start_ms = 0;
