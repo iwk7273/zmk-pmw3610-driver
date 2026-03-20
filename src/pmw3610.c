@@ -551,7 +551,7 @@ static int pmw3610_report_data(const struct device *dev) {
 #endif
 
     if (unlikely(!data->ready)) {
-        LOG_WRN("Device is not initialized yet");
+        LOG_DBG("Device is not initialized yet");
         return -EBUSY;
     }
 
@@ -746,7 +746,11 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
 static void pmw3610_work_callback(struct k_work *work) {
     struct pixart_data *data = CONTAINER_OF(work, struct pixart_data, trigger_work);
     const struct device *dev = data->dev;
-    pmw3610_report_data(dev);
+    (void)pmw3610_report_data(dev);
+    if (!data->ready) {
+        /* Re-init path keeps IRQ disabled; it is re-enabled when init finishes. */
+        return;
+    }
     pmw3610_set_interrupt(dev, true);
 }
 
