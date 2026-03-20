@@ -50,16 +50,20 @@ extern "C" {
 #define PMW3610_REG_SHUTDOWN 0x3B
 
 #define PMW3610_REG_SPI_CLK_ON_REQ 0x41
-#define PMW3610_REG_RES_STEP 0x85
+/* Page-1 offset in Zephyr-style addressing (datasheet absolute: 0x85). */
+#define PMW3610_REG_RES_STEP 0x05
 
 #define PMW3610_REG_NOT_REV_ID 0x3E
 #define PMW3610_REG_NOT_PROD_ID 0x3F
 
 #define PMW3610_REG_PRBS_TEST_CTL 0x47
+/* Page selector register; value selects page (0xFF: page1, 0x00: page0). */
 #define PMW3610_REG_SPI_PAGE0 0x7F
 #define PMW3610_REG_VCSEL_CTL 0x9E
 #define PMW3610_REG_LSR_CONTROL 0x9F
-#define PMW3610_REG_SPI_PAGE1 0xFF
+#define PMW3610_REG_SPI_PAGE1 0x7F
+#define PMW3610_SPI_PAGE0_VALUE 0x00
+#define PMW3610_SPI_PAGE1_VALUE 0xFF
 
 /* Sensor identification values */
 #define PMW3610_PRODUCT_ID 0x3E

@@ -221,13 +221,13 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
     uint8_t addr[] = {
         PMW3610_REG_SPI_PAGE0,
         PMW3610_REG_RES_STEP,
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-        PMW3610_REG_SPI_PAGE1,
-#else
         PMW3610_REG_SPI_PAGE0,
-#endif
     };
-    uint8_t data[] = {0xFF, value, 0x00};
+    uint8_t data[] = {
+        PMW3610_SPI_PAGE1_VALUE,
+        value,
+        PMW3610_SPI_PAGE0_VALUE,
+    };
 
     int err = pmw3610_spi_access_begin(dev);
     if (err) {
