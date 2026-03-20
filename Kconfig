@@ -28,26 +28,6 @@ config PMW3610_CUSTOM_INVERT_X
 config PMW3610_CUSTOM_INVERT_Y
   bool "Invert the Y axis of PMW3610 sensor"
 
-config PMW3610_CUSTOM_IGNORE_FIRST_N
-  int "Ignore first N events to avoid warping"
-  default 4
-
-config PMW3610_CUSTOM_IGNORE_AFTER_REST
-  bool "Ignore first events after rest too"
-  default n
-
-config PMW3610_CUSTOM_ANTI_WARP
-  bool "Discard large movement after inactivity"
-  default n
-
-config PMW3610_CUSTOM_ANTI_WARP_THRES
-  int "Movement less than this value is allowed"
-  default 64
-
-config PMW3610_CUSTOM_ANTI_WARP_INACTIVITY_MS
-  int "Inactivity, msec"
-  default 10000
-
 config PMW3610_CUSTOM_INIT_POWER_UP_EXTRA_DELAY_MS
   int "Extra power up init delay (ms)"
   default 0
@@ -68,31 +48,6 @@ config PMW3610_CUSTOM_INIT_RETRY_DELAY_MS
   help
     Additional delay before retrying PMW3610 initialization after a failure.
 
-config PMW3610_CUSTOM_REINIT_ON_WAKE
-  bool "Re-run PMW3610 async init on activity wake"
-  default n
-  help
-    When enabled, transition to ACTIVE state re-runs the full async PMW3610
-    initialization flow (power-up reset, self-test, and register setup).
-    This helps recover from wake-time sensor read corruption.
-
-config PMW3610_CUSTOM_REINIT_WAKEUP_DELAY_MS
-  int "Delay between PMW3610 wakeup and reset during reinit (ms)"
-  default 20
-  range 0 200
-  help
-    Additional delay inserted between wakeup command (0x96) and reset command
-    (0x5A) in PMW3610 power-up step. Used by wake-time reinitialization.
-
-config PMW3610_CUSTOM_STRICT_SPI_TIMING
-  bool "Enable strict PMW3610 SPI timing (tSRAD/tSWW/tSCLK-NCS)"
-  default n
-  help
-    Enable strict PMW3610 SPI timing handling.
-    - Enforces tSRAD with address/data split reads while holding CS.
-    - Enforces tSWW delay after each write command.
-    - Uses explicit CS delay for write timing requirements.
-
 config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 	int "PMW3610's default minimum report rate"
 	default 0
@@ -101,30 +56,16 @@ config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 		Slow down input reporting for hid queue over the air.
 		Turn value down to 8ms to get sharp response if use with USB only.
 
-config PMW3610_CUSTOM_TRACE
-  bool "Enable PMW3610 resume trace logging"
+config PMW3610_CUSTOM_STRICT_SPI_TIMING
+  bool "Enable strict PMW3610 SPI timing and protocol checks"
   default n
   help
-    Enable temporary diagnostic logs to trace burst motion around
-    activity/sleep resume transitions without changing behavior.
-
-if PMW3610_CUSTOM_TRACE
-
-config PMW3610_CUSTOM_TRACE_WINDOW_MS
-  int "PMW3610 trace window duration (ms)"
-  default 5000
-  range 100 60000
-  help
-    Duration of each trace window after an activity state change.
-
-config PMW3610_CUSTOM_TRACE_IRQ_REPORT_MS
-  int "PMW3610 trace IRQ rate report interval (ms)"
-  default 1000
-  range 100 10000
-  help
-    Interval used to summarize IRQ callback rate during an active trace window.
-
-endif # PMW3610_CUSTOM_TRACE
+    Enable strict SPI access sequencing and protocol checks:
+    - Read path clock gating (0x41=0xBA/B5)
+    - tSRAD-aware burst read path
+    - Strict CPI step validation and page restore handling
+    - Motion flag handling and post-burst motion clear
+    Keep this disabled to preserve legacy behavior.
 
 config PMW3610_CUSTOM_SMART_ALGORITHM
   bool "Enable an algorithm of PMW3610 to enhance surface coverage"

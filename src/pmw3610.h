@@ -10,12 +10,6 @@ extern "C" {
 /* Timings (in us) used in SPI communication. */
 #define T_CLOCK_ON_DELAY_US 300
 #define T_SRAD_DELAY_US 4
-#define T_SWW_DELAY_US 30
-#if IS_ENABLED(CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING)
-#define PMW3610_SPI_CS_DELAY_US 10
-#else
-#define PMW3610_SPI_CS_DELAY_US 0
-#endif
 
 /* Sensor registers (addresses) */
 #define PMW3610_REG_PRODUCT_ID 0x00
@@ -46,6 +40,7 @@ extern "C" {
 #define PMW3610_REG_REST2_RATE 0x1E
 #define PMW3610_REG_REST2_DOWNSHIFT 0x1F
 #define PMW3610_REG_REST3_RATE 0x20
+#define PMW3610_REG_SMART_ALGO 0x32
 #define PMW3610_REG_OBSERVATION 0x2D
 
 #define PMW3610_REG_PIXEL_GRAB 0x35
@@ -81,7 +76,11 @@ extern "C" {
 #define PMW3610_MAX_BURST_SIZE 10
 
 /* Register count used for reading a single motion burst */
+#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
+#define PMW3610_BURST_SIZE PMW3610_MAX_BURST_SIZE
+#else
 #define PMW3610_BURST_SIZE 7
+#endif
 
 /* Position in the motion registers */
 #define PMW3610_X_L_POS 1
@@ -89,6 +88,12 @@ extern "C" {
 #define PMW3610_XY_H_POS 3
 #define PMW3610_SHUTTER_H_POS 5
 #define PMW3610_SHUTTER_L_POS 6
+
+/* Motion status bits */
+#define PMW3610_MOTION_MOT BIT(7)
+#define PMW3610_MOTION_OVF BIT(4)
+#define PMW3610_MOTION_LSR_FAULT BIT(2)
+#define PMW3610_MOTION_RST_FLAG BIT(0)
 
 /* cpi/resolution range */
 #define PMW3610_MAX_CPI 3200
