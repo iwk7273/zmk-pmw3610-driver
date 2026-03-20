@@ -31,10 +31,6 @@ struct pixart_data {
     bool                         ready; // whether init is finished successfully
     int                          err; // error code during async init
     atomic_t                     pending_cpi; // pending CPI before ready (0 = none)
-    int64_t                      dx; // per-device accumulated x delta
-    int64_t                      dy; // per-device accumulated y delta
-    int64_t                      last_smp_time; // last sample timestamp for min report interval
-    int64_t                      last_rpt_time; // last report timestamp for min report interval
 };
 
 // device config data structure

@@ -56,17 +56,6 @@ config PMW3610_CUSTOM_REPORT_INTERVAL_MIN
 		Slow down input reporting for hid queue over the air.
 		Turn value down to 8ms to get sharp response if use with USB only.
 
-config PMW3610_CUSTOM_STRICT_SPI_TIMING
-  bool "Enable strict PMW3610 SPI timing and protocol checks"
-  default n
-  help
-    Enable strict SPI access sequencing and protocol checks:
-    - Read path clock gating (0x41=0xBA/B5)
-    - tSRAD-aware burst read path
-    - Strict CPI step validation and page restore handling
-    - Motion flag handling and post-burst motion clear
-    Keep this disabled to preserve legacy behavior.
-
 config PMW3610_CUSTOM_SMART_ALGORITHM
   bool "Enable an algorithm of PMW3610 to enhance surface coverage"
   default y

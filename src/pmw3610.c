@@ -58,7 +58,7 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
 
 //////// Function definitions //////////
 
-static int pmw3610_raw_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
+static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
 	const struct pixart_config *cfg = dev->config;
 	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
@@ -70,7 +70,11 @@ static int pmw3610_raw_read(const struct device *dev, uint8_t addr, uint8_t *val
 	return spi_transceive_dt(&cfg->spi, &tx, &rx);
 }
 
-static int pmw3610_raw_write_reg(const struct device *dev, uint8_t addr, uint8_t value) {
+static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
+	return pmw3610_read(dev, addr, value, 1);
+}
+
+static int pmw3610_write_reg(const struct device *dev, uint8_t addr, uint8_t value) {
 	const struct pixart_config *cfg = dev->config;
 	uint8_t write_buf[] = {addr | SPI_WRITE_BIT, value};
 	const struct spi_buf tx_buf = { .buf = write_buf, .len = sizeof(write_buf), };
@@ -78,120 +82,17 @@ static int pmw3610_raw_write_reg(const struct device *dev, uint8_t addr, uint8_t
 	return spi_write_dt(&cfg->spi, &tx);
 }
 
-static int pmw3610_spi_access_begin(const struct device *dev) {
-    int err = pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_ENABLE);
-    if (err) {
-        LOG_ERR("Failed to enable SPI clock (%d)", err);
-        return err;
-    }
-    k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
-    return 0;
-}
-
-static int pmw3610_spi_access_end(const struct device *dev) {
-    int err = pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
-    if (err) {
-        LOG_ERR("Failed to disable SPI clock (%d)", err);
-    }
-    return err;
-}
-
-static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    int err = pmw3610_spi_access_begin(dev);
-    if (err) {
-        return err;
-    }
-
-    err = pmw3610_raw_read(dev, addr, value, len);
-    int end_err = pmw3610_spi_access_end(dev);
-
-    if (!err && end_err) {
-        err = end_err;
-    }
-
-    return err;
-#else
-    return pmw3610_raw_read(dev, addr, value, len);
-#endif
-}
-
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-static int pmw3610_read_motion_burst_raw(const struct device *dev, uint8_t *value, uint8_t len) {
-    const struct pixart_config *cfg = dev->config;
-    uint8_t addr = PMW3610_REG_MOTION_BURST;
-    struct spi_config spi_cfg = cfg->spi.config;
-    const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
-    const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
-    const struct spi_buf rx_buf = { .buf = value, .len = len };
-    const struct spi_buf_set rx = { .buffers = &rx_buf, .count = 1 };
-    int err;
-
-    spi_cfg.operation |= SPI_HOLD_ON_CS | SPI_LOCK_ON;
-
-    err = spi_write(cfg->spi.bus, &spi_cfg, &tx);
-    if (err) {
-        goto out_release;
-    }
-
-    /* tSRAD requires a delay between sending burst address and reading payload. */
-    k_busy_wait(T_SRAD_DELAY_US);
-
-    err = spi_read(cfg->spi.bus, &spi_cfg, &rx);
-
-out_release: {
-        int release_err = spi_release(cfg->spi.bus, &spi_cfg);
-        if (!err && release_err) {
-            err = release_err;
-        }
-    }
-
-    return err;
-}
-#endif
-
-static int pmw3610_read_motion_burst(const struct device *dev, uint8_t *value, uint8_t len) {
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    int err = pmw3610_spi_access_begin(dev);
-    if (err) {
-        return err;
-    }
-
-    err = pmw3610_read_motion_burst_raw(dev, value, len);
-    if (err == -ENOTSUP) {
-        LOG_WRN("Burst tSRAD path unsupported by SPI driver, falling back to transceive");
-        err = pmw3610_raw_read(dev, PMW3610_REG_MOTION_BURST, value, len);
-    }
-    int end_err = pmw3610_spi_access_end(dev);
-
-    if (!err && end_err) {
-        err = end_err;
-    }
-
-    return err;
-#else
-    return pmw3610_raw_read(dev, PMW3610_REG_MOTION_BURST, value, len);
-#endif
-}
-
-static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
-	return pmw3610_read(dev, addr, value, 1);
-}
-
 static int pmw3610_write(const struct device *dev, uint8_t reg, uint8_t val) {
-    int err = pmw3610_spi_access_begin(dev);
-    if (err) {
+	pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_ENABLE);
+	k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
+
+    int err = pmw3610_write_reg(dev, reg, val);
+    if (unlikely(err != 0)) {
         return err;
     }
-
-    err = pmw3610_raw_write_reg(dev, reg, val);
-    int end_err = pmw3610_spi_access_end(dev);
-
-    if (!err && end_err) {
-        err = end_err;
-    }
-
-    return err;
+    
+    pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
+    return 0;
 }
 
 static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
@@ -206,46 +107,28 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
         LOG_ERR("CPI value %u out of range", cpi);
         return -EINVAL;
     }
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    if ((cpi % PMW3610_MIN_CPI) != 0) {
-        LOG_ERR("CPI value %u must be a %u-step value", cpi, PMW3610_MIN_CPI);
-        return -EINVAL;
-    }
-#endif
 
     // Convert CPI to register value
     uint8_t value = (cpi / 200);
     LOG_INF("Setting CPI to %u (reg value 0x%x)", cpi, value);
 
     /* set the cpi */
-    uint8_t addr[] = {
-        PMW3610_REG_SPI_PAGE0,
-        PMW3610_REG_RES_STEP,
-        PMW3610_REG_SPI_PAGE0,
-    };
-    uint8_t data[] = {
-        PMW3610_SPI_PAGE1_VALUE,
-        value,
-        PMW3610_SPI_PAGE0_VALUE,
-    };
+    uint8_t addr[] = {0x7F, PMW3610_REG_RES_STEP, 0x7F};
+    uint8_t data[] = {0xFF, value, 0x00};
 
-    int err = pmw3610_spi_access_begin(dev);
-    if (err) {
-        return err;
-    }
+	pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_ENABLE);
+	k_sleep(K_USEC(T_CLOCK_ON_DELAY_US));
 
     /* Write data */
+    int err;
     for (size_t i = 0; i < sizeof(data); i++) {
-        err = pmw3610_raw_write_reg(dev, addr[i], data[i]);
+        err = pmw3610_write_reg(dev, addr[i], data[i]);
         if (err) {
             LOG_ERR("Burst write failed on SPI write (data)");
             break;
         }
     }
-    int end_err = pmw3610_spi_access_end(dev);
-    if (!err && end_err) {
-        err = end_err;
-    }
+    pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
 
     if (err) {
         LOG_ERR("Failed to set CPI");
@@ -253,38 +136,6 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
     }
 
     return 0;
-}
-
-static int pmw3610_read_res_step(const struct device *dev, uint8_t *value) {
-    int err = pmw3610_spi_access_begin(dev);
-    bool page1_selected = false;
-
-    if (err) {
-        return err;
-    }
-
-    err = pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_PAGE0, PMW3610_SPI_PAGE1_VALUE);
-    if (!err) {
-        page1_selected = true;
-        err = pmw3610_raw_read(dev, PMW3610_REG_RES_STEP, value, 1);
-    }
-
-    if (page1_selected) {
-        int restore_err =
-            pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_PAGE0, PMW3610_SPI_PAGE0_VALUE);
-        if (!err && restore_err) {
-            err = restore_err;
-        }
-    }
-
-    {
-        int end_err = pmw3610_spi_access_end(dev);
-        if (!err && end_err) {
-            err = end_err;
-        }
-    }
-
-    return err;
 }
 
 /* Set sampling rate in each mode (in ms) */
@@ -421,11 +272,7 @@ static int pmw3610_set_interrupt(const struct device *dev, const bool en) {
 }
 
 static int pmw3610_async_init_power_up(const struct device *dev) {
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-	int ret = pmw3610_write(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
-#else
-    int ret = pmw3610_raw_write_reg(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
-#endif
+	int ret = pmw3610_write_reg(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_RESET);
     if (ret < 0) {
         return ret;
     }
@@ -571,87 +418,26 @@ static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
     uint8_t buf[PMW3610_BURST_SIZE];
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    int ret = 0;
-#else
-    static int64_t dx = 0;
-    static int64_t dy = 0;
-#if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
-    static int64_t last_smp_time = 0;
-    static int64_t last_rpt_time = 0;
-#endif
-#endif
 
     if (unlikely(!data->ready)) {
-        LOG_DBG("Device is not initialized yet");
+        LOG_WRN("Device is not initialized yet");
         return -EBUSY;
     }
 
+    static int64_t dx = 0;
+    static int64_t dy = 0;
+
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
+    static int64_t last_smp_time = 0;
+    static int64_t last_rpt_time = 0;
     int64_t now = k_uptime_get();
 #endif
 
-	int err = pmw3610_read_motion_burst(dev, buf, PMW3610_BURST_SIZE);
+	int err = pmw3610_read(dev, PMW3610_REG_MOTION_BURST, buf, PMW3610_BURST_SIZE);
     if (err) {
         return err;
     }
     // LOG_HEXDUMP_DBG(buf, PMW3610_BURST_SIZE, "buf");
-
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    uint8_t motion = buf[0];
-    if (motion & PMW3610_MOTION_OVF) {
-        LOG_WRN("Motion overflow (motion=0x%x)", motion);
-    }
-    if (motion & PMW3610_MOTION_LSR_FAULT) {
-        LOG_ERR("Laser fault detected (motion=0x%x)", motion);
-    }
-    if (motion & PMW3610_MOTION_RST_FLAG) {
-        uint32_t configured_cpi = config->cpi;
-        bool cpi_valid = (configured_cpi >= PMW3610_MIN_CPI) && (configured_cpi <= PMW3610_MAX_CPI) &&
-                         ((configured_cpi % PMW3610_MIN_CPI) == 0U);
-        uint8_t expected_res_step = (uint8_t)(configured_cpi / PMW3610_MIN_CPI);
-        uint8_t res_step = 0U;
-        int clear_err;
-        int res_err;
-
-        LOG_WRN("RST_FLAG detected (motion=0x%x)", motion);
-
-        /* Drop this sample and clear MOTION latched state before deciding re-init. */
-        clear_err = pmw3610_write(dev, PMW3610_REG_MOTION, 0x00);
-        if (clear_err) {
-            LOG_WRN("RST_FLAG verify: failed to clear MOTION (%d)", clear_err);
-        }
-
-        res_err = pmw3610_read_res_step(dev, &res_step);
-        if (res_err) {
-            LOG_WRN("RST_FLAG verify: failed to read RES_STEP (%d)", res_err);
-        }
-
-        if (!cpi_valid) {
-            LOG_WRN("RST_FLAG verify: invalid configured CPI %u", configured_cpi);
-        }
-
-        if ((clear_err == 0) && (res_err == 0) && cpi_valid && (res_step == expected_res_step)) {
-            LOG_WRN("RST_FLAG ignored: config intact (res_step=0x%x)", res_step);
-            return ret;
-        }
-
-        if ((res_err == 0) && cpi_valid) {
-            LOG_WRN("RST_FLAG reinit: config mismatch (res_step=0x%x expected=0x%x)", res_step,
-                    expected_res_step);
-        } else {
-            LOG_WRN("RST_FLAG reinit: config read error (clear_err=%d, res_err=%d)", clear_err,
-                    res_err);
-        }
-
-        data->ready = false;
-        data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
-        data->init_retry_count = 0;
-        pmw3610_set_interrupt(dev, false);
-        k_work_schedule(&data->init_work, K_MSEC(async_init_delay[ASYNC_INIT_STEP_POWER_UP]));
-        return -EAGAIN;
-    }
-#endif
 
 // 12-bit two's complement value to int16_t
 // adapted from https://stackoverflow.com/questions/70802306/convert-a-12-bit-signed-number-in-c
@@ -674,112 +460,50 @@ static int pmw3610_report_data(const struct device *dev) {
 #endif
 
 #ifdef CONFIG_PMW3610_CUSTOM_SMART_ALGORITHM
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    uint8_t shutter_hi = buf[PMW3610_SHUTTER_H_POS] & 0x01;
-    uint8_t shutter_lo = buf[PMW3610_SHUTTER_L_POS];
-
-    if (shutter_hi == 0U) {
-        if (data->sw_smart_flag && shutter_lo < 45U) {
-            err = pmw3610_write(dev, PMW3610_REG_SMART_ALGO, 0x00);
-            if (err) {
-                LOG_WRN("Failed to apply smart enable setting (%d)", err);
-                if (ret == 0) {
-                    ret = err;
-                }
-            } else {
-                data->sw_smart_flag = false;
-            }
-        } else if (!data->sw_smart_flag && shutter_lo > 45U) {
-            err = pmw3610_write(dev, PMW3610_REG_SMART_ALGO, 0x80);
-            if (err) {
-                LOG_WRN("Failed to apply smart disable setting (%d)", err);
-                if (ret == 0) {
-                    ret = err;
-                }
-            } else {
-                data->sw_smart_flag = true;
-            }
-        }
-    }
-#else
-    int16_t shutter = ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8)
+    int16_t shutter = ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8) 
                     + buf[PMW3610_SHUTTER_L_POS];
     if (data->sw_smart_flag && shutter < 45) {
-        pmw3610_write(dev, PMW3610_REG_SMART_ALGO, 0x00);
+        pmw3610_write(dev, 0x32, 0x00);
         data->sw_smart_flag = false;
     }
     if (!data->sw_smart_flag && shutter > 45) {
-        pmw3610_write(dev, PMW3610_REG_SMART_ALGO, 0x80);
+        pmw3610_write(dev, 0x32, 0x80);
         data->sw_smart_flag = true;
     }
-#endif
 #endif
 
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
     // purge accumulated delta, if last sampled had not been reported on last report tick
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    if (now - data->last_smp_time >= CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN) {
-        data->dx = 0;
-        data->dy = 0;
-    }
-    data->last_smp_time = now;
-#else
     if (now - last_smp_time >= CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN) {
         dx = 0;
         dy = 0;
     }
     last_smp_time = now;
 #endif
-#endif
 
     // accumulate delta until report in next iteration
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    data->dx += x;
-    data->dy += y;
-#else
     dx += x;
     dy += y;
-#endif
 
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
     // strict to report inerval
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    if (now - data->last_rpt_time < CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN) {
-        goto clear_motion;
-    }
-#else
     if (now - last_rpt_time < CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN) {
         return 0;
     }
 #endif
-#endif
 
     // fetch report value
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-    int16_t rx = (int16_t)CLAMP(data->dx, INT16_MIN, INT16_MAX);
-    int16_t ry = (int16_t)CLAMP(data->dy, INT16_MIN, INT16_MAX);
-#else
     int16_t rx = (int16_t)CLAMP(dx, INT16_MIN, INT16_MAX);
     int16_t ry = (int16_t)CLAMP(dy, INT16_MIN, INT16_MAX);
-#endif
     bool have_x = rx != 0;
     bool have_y = ry != 0;
 
     if (have_x || have_y) {
 #if CONFIG_PMW3610_CUSTOM_REPORT_INTERVAL_MIN > 0
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-        data->last_rpt_time = now;
-#else
         last_rpt_time = now;
 #endif
-#endif
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-        data->dx = 0;
-        data->dy = 0;
-#else
         dx = 0;
         dy = 0;
-#endif
         if (have_x) {
             input_report(dev, config->evt_type, config->x_input_code, rx, !have_y, K_NO_WAIT);
         }
@@ -788,20 +512,7 @@ static int pmw3610_report_data(const struct device *dev) {
         }
     }
 
-#ifdef CONFIG_PMW3610_CUSTOM_STRICT_SPI_TIMING
-clear_motion:
-    err = pmw3610_write(dev, PMW3610_REG_MOTION, 0x00);
-    if (err) {
-        LOG_WRN("Failed to clear motion register (%d)", err);
-        if (ret == 0) {
-            ret = err;
-        }
-    }
-
-    return ret;
-#else
     return err;
-#endif
 }
 
 static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callback *cb,
@@ -815,11 +526,7 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
 static void pmw3610_work_callback(struct k_work *work) {
     struct pixart_data *data = CONTAINER_OF(work, struct pixart_data, trigger_work);
     const struct device *dev = data->dev;
-    (void)pmw3610_report_data(dev);
-    if (!data->ready) {
-        /* Re-init path keeps IRQ disabled; it is re-enabled when init finishes. */
-        return;
-    }
+    pmw3610_report_data(dev);
     pmw3610_set_interrupt(dev, true);
 }
 
@@ -864,15 +571,8 @@ static int pmw3610_init_irq(const struct device *dev) {
 
     // init device pointer
     data->dev = dev;
-    data->ready = false;
-    data->err = 0;
-    data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
     atomic_set(&data->pending_cpi, 0);
     data->init_retry_count = 0;
-    data->dx = 0;
-    data->dy = 0;
-    data->last_smp_time = 0;
-    data->last_rpt_time = 0;
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;
