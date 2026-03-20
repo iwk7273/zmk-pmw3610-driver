@@ -574,7 +574,22 @@ static int pmw3610_report_data(const struct device *dev) {
         LOG_ERR("Laser fault detected (motion=0x%x)", motion);
     }
     if (motion & PMW3610_MOTION_RST_FLAG) {
-        LOG_WRN("Reset flag detected (motion=0x%x), scheduling re-init", motion);
+        uint8_t motion_after_clear = motion;
+        LOG_WRN("Reset flag detected (motion=0x%x), trying to clear", motion);
+        err = pmw3610_write(dev, PMW3610_REG_MOTION, 0x00);
+        if (err) {
+            LOG_WRN("Failed to clear motion register after reset flag (%d)", err);
+        } else {
+            int read_err = pmw3610_read_reg(dev, PMW3610_REG_MOTION, &motion_after_clear);
+            if (read_err) {
+                LOG_WRN("Failed to re-read motion register after clear (%d)", read_err);
+            } else if ((motion_after_clear & PMW3610_MOTION_RST_FLAG) == 0U) {
+                LOG_WRN("Reset flag cleared (motion=0x%x), skip re-init", motion_after_clear);
+                return ret;
+            }
+        }
+
+        LOG_WRN("Reset flag persists (motion=0x%x), scheduling re-init", motion_after_clear);
         data->ready = false;
         data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
         data->init_retry_count = 0;
