@@ -255,6 +255,38 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi) {
     return 0;
 }
 
+static int pmw3610_read_res_step(const struct device *dev, uint8_t *value) {
+    int err = pmw3610_spi_access_begin(dev);
+    bool page1_selected = false;
+
+    if (err) {
+        return err;
+    }
+
+    err = pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_PAGE0, PMW3610_SPI_PAGE1_VALUE);
+    if (!err) {
+        page1_selected = true;
+        err = pmw3610_raw_read(dev, PMW3610_REG_RES_STEP, value, 1);
+    }
+
+    if (page1_selected) {
+        int restore_err =
+            pmw3610_raw_write_reg(dev, PMW3610_REG_SPI_PAGE0, PMW3610_SPI_PAGE0_VALUE);
+        if (!err && restore_err) {
+            err = restore_err;
+        }
+    }
+
+    {
+        int end_err = pmw3610_spi_access_end(dev);
+        if (!err && end_err) {
+            err = end_err;
+        }
+    }
+
+    return err;
+}
+
 /* Set sampling rate in each mode (in ms) */
 static int pmw3610_set_sample_time(const struct device *dev, uint8_t reg_addr, uint32_t sample_time) {
     uint32_t maxtime = 2550;
@@ -574,22 +606,44 @@ static int pmw3610_report_data(const struct device *dev) {
         LOG_ERR("Laser fault detected (motion=0x%x)", motion);
     }
     if (motion & PMW3610_MOTION_RST_FLAG) {
-        uint8_t motion_after_clear = motion;
-        LOG_WRN("Reset flag detected (motion=0x%x), trying to clear", motion);
-        err = pmw3610_write(dev, PMW3610_REG_MOTION, 0x00);
-        if (err) {
-            LOG_WRN("Failed to clear motion register after reset flag (%d)", err);
-        } else {
-            int read_err = pmw3610_read_reg(dev, PMW3610_REG_MOTION, &motion_after_clear);
-            if (read_err) {
-                LOG_WRN("Failed to re-read motion register after clear (%d)", read_err);
-            } else if ((motion_after_clear & PMW3610_MOTION_RST_FLAG) == 0U) {
-                LOG_WRN("Reset flag cleared (motion=0x%x), skip re-init", motion_after_clear);
-                return ret;
-            }
+        uint32_t configured_cpi = config->cpi;
+        bool cpi_valid = (configured_cpi >= PMW3610_MIN_CPI) && (configured_cpi <= PMW3610_MAX_CPI) &&
+                         ((configured_cpi % PMW3610_MIN_CPI) == 0U);
+        uint8_t expected_res_step = (uint8_t)(configured_cpi / PMW3610_MIN_CPI);
+        uint8_t res_step = 0U;
+        int clear_err;
+        int res_err;
+
+        LOG_WRN("RST_FLAG detected (motion=0x%x)", motion);
+
+        /* Drop this sample and clear MOTION latched state before deciding re-init. */
+        clear_err = pmw3610_write(dev, PMW3610_REG_MOTION, 0x00);
+        if (clear_err) {
+            LOG_WRN("RST_FLAG verify: failed to clear MOTION (%d)", clear_err);
         }
 
-        LOG_WRN("Reset flag persists (motion=0x%x), scheduling re-init", motion_after_clear);
+        res_err = pmw3610_read_res_step(dev, &res_step);
+        if (res_err) {
+            LOG_WRN("RST_FLAG verify: failed to read RES_STEP (%d)", res_err);
+        }
+
+        if (!cpi_valid) {
+            LOG_WRN("RST_FLAG verify: invalid configured CPI %u", configured_cpi);
+        }
+
+        if ((clear_err == 0) && (res_err == 0) && cpi_valid && (res_step == expected_res_step)) {
+            LOG_WRN("RST_FLAG ignored: config intact (res_step=0x%x)", res_step);
+            return ret;
+        }
+
+        if ((res_err == 0) && cpi_valid) {
+            LOG_WRN("RST_FLAG reinit: config mismatch (res_step=0x%x expected=0x%x)", res_step,
+                    expected_res_step);
+        } else {
+            LOG_WRN("RST_FLAG reinit: config read error (clear_err=%d, res_err=%d)", clear_err,
+                    res_err);
+        }
+
         data->ready = false;
         data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
         data->init_retry_count = 0;
